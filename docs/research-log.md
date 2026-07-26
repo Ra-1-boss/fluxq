@@ -4,6 +4,48 @@ A running record of what's been read, built, and understood -- in the order it h
 
 ---
 
+## 2026-07-26 -- First real-data verification: 5 real RTS-GMLC generators, hand-reasoning confirmed by brute force
+
+**Context:** after yesterday's full repository restart (new repo, clean single-layer folder structure, all verified Phase 0 code carried over unchanged), today's goal was to stop relying on synthetic toy data entirely and wire in a real, published grid dataset from the ground up -- starting with a small, deliberately hand-verifiable slice before scaling to anything larger.
+
+**Dataset:** RTS-GMLC (Reliability Test System - Grid Modernization Laboratory Consortium), `github.com/GridMod/RTS-GMLC` -- a real, NREL/GMLC-built synthetic test system used across the power systems research community, containing full generator technical parameters plus a year of load/wind/solar timeseries.
+
+**Explored:** `gen.csv` (158 total generators). Fuel type breakdown: Solar 57, NG 37, Hydro 20, Oil 19, Coal 16, Wind 4, Sync_Cond 3, Storage 1, Nuclear 1. Filtered to dispatchable thermal types only (Oil, Coal, NG) -- 72 generators survive the filter. Excluded Nuclear (can't cycle on UC timescales), Hydro (reservoir constraints not yet modeled), Solar/Wind (must-take, no real commitment decision), Sync_Cond (produces no real power, voltage support only), Storage (needs a different QUBO structure -- bidirectional flow, not on/off).
+
+**Resolved two real unit-convention questions before writing any code:**
+- Confirmed `HR_avg_0` (heat rate) is in **Btu/kWh**, not MMBTU/MWh, by cross-checking real values against known plant efficiency ranges (e.g. `107_CC_1` at 7222 Btu/kWh implies ~47% efficiency -- correct for a modern gas combined-cycle plant; the alternative unit convention would imply a physically impossible near-zero efficiency).
+- Derived `c_fuel = HR_avg_0 * Fuel Price / 1000` and `SU_cost = Start Heat Cold MBTU * Fuel Price + Non Fuel Start Cost`, verified against real rows before generalizing.
+
+**Selected 5 generators by hand** spanning the real merit order -- `223_STEAM_3` (350 MW coal baseload, cheapest, slowest to cycle: MUT=24h/MDT=48h) down to `101_CT_1` (20 MW oil peaker, most expensive, fastest to cycle: MUT=MDT=1h). Total capacity 856 MW. Chose this specific 5 deliberately: `n_vars = 5 x 4 timesteps = 20`, still within brute-force range (2^20 states), while being a genuine jump from synthetic data to real generator economics.
+
+**Caught and corrected an arithmetic error mid-session:** initial by-hand SU_cost calculations for these 5 generators had small errors (largest: off by ~$4.21 on `223_STEAM_3`'s startup cost) from a decimal decomposition slip. Rechecked with a second independent decomposition before writing any code, and wrote the derivation formula directly into `make_rts_gmlc_sample()` rather than hardcoding hand-rounded numbers -- so the source values and the formula are both visible and independently checkable in the code itself, not hidden behind possibly-wrong manual arithmetic.
+
+**Built:**
+- `fluxq/data/grid_builder.py::make_rts_gmlc_sample()` -- the 5 real generators, computed from raw RTS-GMLC source fields transcribed directly from `gen.csv`.
+- `tests/test_rts_gmlc_sample.py` -- 5 new tests verifying the derived values match hand computation within tolerance, plus a test protecting the merit-order/flexibility tradeoff property that motivated this particular selection.
+- `demos/rts_gmlc_5gen_brute_force.py` -- brute-force verification against a hand-designed demand profile. Checked all 32 possible subsets of `{350, 76, 355, 55, 20}` MW by hand beforehand to confirm each of the 4 chosen demand values (350, 705, 856, 426 MW) has exactly one exact-match combination, making the brute-force result unambiguous to verify.
+
+**Result:**
+```
+python -m pytest tests\ -v          -> 43 passed in 3.27s   (38 Phase 0 + 5 new)
+python demos\rts_gmlc_5gen_brute_force.py
+  -> Enumerated 1,048,576 states in 4.02s
+  -> Best schedule found EXACTLY matches hand-reasoned prediction:
+       223_STEAM_3 ON continuously (1,1,1,1) -- required at every timestep,
+       pays its $36,749.81 startup cost exactly once
+     101_STEAM_3, 107_CC_1, 315_CT_7, 101_CT_1 switch on/off exactly at the
+     timesteps predicted by the by-hand subset-sum analysis
+  -> Zero power imbalance at every timestep
+  -> Total cost $144,040.40 (predicted by hand: ~$144,040.38 -- 2 cent
+     difference is floating-point rounding only)
+```
+
+**Real finding, now empirically confirmed rather than theoretical:** startup cost is **56.7%** of total cost over this 4-hour window -- using real generator numbers, not an invented example. For a system built around large thermal units, scheduling that ignores startup-cost-aware constraints (exactly what MUT/MDT protects against) is missing over half the true cost structure. This is now a citable, defensible number for why Phase 1 matters, not an assumption.
+
+**Next:** two threads now open. (1) Generalize `make_rts_gmlc_sample()` into a full `load_rts_gmlc_generators()` that reads `gen.csv` directly rather than hand-transcribed values, removing the transcription-error risk this session already caught once. (2) Implement `add_mut_constraint`/`add_mdt_constraint` (still open from 2026-07-04) -- this 5-generator real sample, with its genuine MUT/MDT spread (1h to 48h), is a strong first test case once that work starts.
+
+---
+
 ## 2026-07-08 -- Phase 0 verified end-to-end: environment and repository debugging session
 
 **Context for anyone reading this:** this entry is longer than usual because today wasn't about reading a new paper or writing new math -- it was about discovering that most of Phase 0's code, which we believed was already built and correct, had never actually made it onto disk, and then discovering the disk itself wasn't where GitHub thought it was either. What follows is the full story of how both problems were found and fixed, in order, so anyone picking this up can understand exactly what state the repo is in and why. Every formula and every line of code referenced below had already been verified by hand against test cases before today -- today was purely about getting that verified code to actually run, and to actually reach GitHub.
