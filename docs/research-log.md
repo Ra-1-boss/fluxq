@@ -42,7 +42,22 @@ python demos\rts_gmlc_5gen_brute_force.py
 
 **Real finding, now empirically confirmed rather than theoretical:** startup cost is **56.7%** of total cost over this 4-hour window -- using real generator numbers, not an invented example. For a system built around large thermal units, scheduling that ignores startup-cost-aware constraints (exactly what MUT/MDT protects against) is missing over half the true cost structure. This is now a citable, defensible number for why Phase 1 matters, not an assumption.
 
-**Next:** two threads now open. (1) Generalize `make_rts_gmlc_sample()` into a full `load_rts_gmlc_generators()` that reads `gen.csv` directly rather than hand-transcribed values, removing the transcription-error risk this session already caught once. (2) Implement `add_mut_constraint`/`add_mdt_constraint` (still open from 2026-07-04) -- this 5-generator real sample, with its genuine MUT/MDT spread (1h to 48h), is a strong first test case once that work starts.
+**Later same day -- generalized the loader.** Wrote `fluxq/data/loader.py::load_rts_gmlc_generators()`, applying the same derivation formulas automatically across all 72 dispatchable generators instead of the 5 hand-transcribed ones. Rather than hand-verifying 72 rows of arithmetic (which would just reintroduce the exact transcription risk this work exists to remove), the validation strategy was to **cross-check the general loader against the 5 already-verified generators**: if it reproduces those exact values from the raw CSV, that's strong evidence of correctness across the rest.
+
+`tests/test_rts_gmlc_loader.py::test_cross_validated_against_hand_verified_sample` confirms this -- the loader independently reproduces every hand-derived value (including the corrected `223_STEAM_3` startup cost) straight from the real file. Also added: a 72-count regression test, a Coal-only filter test (16, matching the earlier by-hand `Group-Object` count), and a clear `FileNotFoundError` for missing files rather than a confusing downstream crash.
+
+**Known, deliberate gap:** the cross-validation test does not compare `P_min` -- the hand-verified sample never captured real `P_min` values, so it defaults to `0.0` there, while the general loader correctly reads real `P_min` from the CSV. Not a bug in either function, just an honest asymmetry worth fixing later if `P_min` becomes relevant (it isn't yet -- Phase 0's binary model doesn't use it).
+
+```
+python -m pytest tests\ -v   -> 50 passed in 1.32s   (43 + 7 new loader tests)
+
+load_rts_gmlc_generators(..., verbose=True):
+  158 total rows -> 72 kept (Coal, NG, Oil)
+  Excluded: Solar 57, Hydro 20, Wind 4, Sync_Cond 3, Nuclear 1, Storage 1
+  (matches the by-hand PowerShell count from earlier today, exactly)
+```
+
+**Next:** implement `add_mut_constraint`/`add_mdt_constraint` (still open from 2026-07-04). The full 72-generator real set, with its genuine MUT/MDT spread, is now loadable and ready to use once that work starts -- though brute-force verification won't scale past a handful of generators, so Phase 1 will also need a first real solver (Simulated Annealing) to search larger real systems.
 
 ---
 

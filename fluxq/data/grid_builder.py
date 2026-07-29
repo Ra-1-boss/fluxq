@@ -124,6 +124,58 @@ def make_toy_generators() -> List[Generator]:
     ]
 
 
+def make_rts_gmlc_sample() -> List[Generator]:
+    """
+    5-generator sample drawn from real RTS-GMLC data
+    (github.com/GridMod/RTS-GMLC, RTS_Data/SourceData/gen.csv),
+    selected to span the real merit order from cheapest/slowest-cycling
+    (baseload coal) to most expensive/fastest-cycling (oil peaker), while
+    keeping n_vars small enough to brute-force verify (5 gens x 4 timesteps
+    = 20 binary variables, 2^20 states).
+
+    Derivation formulas (see docs/glossary.md for full explanation and the
+    unit-convention check that confirmed heat rate is in Btu/kWh):
+
+        c_fuel  = HR_avg_0 (Btu/kWh) * Fuel Price ($/MMBTU) / 1000
+        SU_cost = Start Heat Cold (MBTU) * Fuel Price ($/MMBTU)
+                  + Non Fuel Start Cost ($)
+        SD_cost = Non Fuel Shutdown Cost ($)
+        MUT/MDT = ceil(Min Up/Down Time Hr) -- rounded UP, never down, so we
+                  never under-represent how long a real unit must stay
+                  committed once it starts or stops.
+
+    Non-dispatchable fuel types (Nuclear, Hydro, Solar, Wind, Sync_Cond,
+    Storage) are excluded from FluxQ's binary on/off model -- see
+    docs/glossary.md for the reasoning behind each exclusion.
+
+    Raw source values transcribed directly from gen.csv, 2026-07-26.
+    """
+    import math
+
+    def _gen(uid, p_max, fuel_price, heat_rate, start_heat_cold,
+             non_fuel_start, non_fuel_shutdown, mut_hr, mdt_hr):
+        c_fuel = heat_rate * fuel_price / 1000.0
+        su_cost = start_heat_cold * fuel_price + non_fuel_start
+        sd_cost = non_fuel_shutdown
+        return Generator(
+            name=uid,
+            P_max=p_max,
+            c_fuel=c_fuel,
+            SU_cost=su_cost,
+            SD_cost=sd_cost,
+            MUT=math.ceil(mut_hr),
+            MDT=math.ceil(mdt_hr),
+        )
+
+    return [
+        _gen("223_STEAM_3", 350.0, 2.11399, 11229, 17384.1, 0.0, 0.0, 24, 48),
+        _gen("101_STEAM_3", 76.0,  2.11399, 13270, 5284.8,  0.0, 0.0, 8,  4),
+        _gen("107_CC_1",    355.0, 3.88722, 7222,  7215.1,  0.0, 0.0, 8,  4.5),
+        _gen("315_CT_7",    55.0,  3.88722, 10342, 1457.4,  0.0, 0.0, 2.2, 2.2),
+        _gen("101_CT_1",    20.0,  10.3494, 13114, 5.0,     0.0, 0.0, 1,  1),
+    ]
+
+
 def make_ieee14_generators() -> List[Generator]:
     """
     Approximate generator parameters for the IEEE 14-bus test case.
