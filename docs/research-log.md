@@ -4,6 +4,52 @@ A running record of what's been read, built, and understood -- in the order it h
 
 ---
 
+## 2026-07-29 -- Phase 1: MUT/MDT constraints implemented, the research gap since 2026-07-04 finally closed
+
+**Context:** this is the actual research contribution FluxQ set out to make. Glover's QUBO tutorial (read 2026-07-04) has no worked example for constraints that couple a binary variable to itself across multiple future timesteps -- every example in it is a single-timestep constraint. Minimum Up Time and Minimum Down Time need exactly that: "if a generator starts at t, it must stay on through t+1, ..., t+MUT-1." This entry is the full derivation, the bug caught while deriving it, and the verification against real generator data.
+
+**Why this is genuinely harder than Power Balance:** expanding the MUT violation condition -- `started_at_t * (1 - x_{t+k})` -- produces a term with **three** binary variables multiplied together: `x_t * x_{t-1} * x_{t+k}`. QUBO is strictly pairwise by definition; a cubic term cannot be written into a Q matrix directly. This is precisely the gap the July 4th entry flagged.
+
+**The fix -- Rosenberg's cubic-to-quadratic reduction** (Rosenberg, 1975; mentioned only in passing, without a worked example, in Glover et al. section 7): introduce one auxiliary binary variable per (generator, timestep) pair, `w_{i,t}`, meant to equal the product `x_{i,t-1} * x_{i,t}`. Force it to that value with a penalty:
+
+```
+P_link(a, b, w) = a*b - 2*a*w - 2*b*w + 3*w
+```
+
+Verified by hand against all 8 combinations of `(a, b, w)` before writing any code: equals exactly 0 when `w = a*b`, strictly positive (1 or 3) otherwise. Substituting `w` for the product everywhere it appears collapses every cubic term back to degree <= 2. MUT and MDT both need the same product (it appears in both the startup and shutdown indicators), so they share one `w` block and one linking penalty rather than needing two.
+
+**A real bug caught mid-derivation:** an early draft wrote the quadratic term `w_{i,t} * x_{i,t+k}` into the matrix as `Q[w, idx_tk]`. Since the auxiliary `w` block is appended after all real variables, `w`'s index is always larger than any real variable's index -- meaning this silently wrote into the *lower* triangle, breaking the "Q is strictly upper-triangular" structural invariant every other function in this codebase maintains. The bug would not have shown up as a wrong energy value (`evaluate()` sums over the full matrix regardless of triangle), but it would have broken `check_qubo_matrix()`'s off-diagonal range diagnostic, which only scans the upper triangle. Caught by re-deriving the index ordering explicitly for every term before writing the final code, not by testing after the fact.
+
+**Hand-verified test cases, worked out before any code:**
+- MUT=2, 1 generator, T=3, starting OFF: all 8 possible schedules checked against real-world feasibility by hand (e.g. "starts at t0, shuts off after 1 step" should violate; "starts at t0, stays 2 steps" should not). 3 infeasible, 5 feasible.
+- MDT=2, 1 generator, T=3, starting ON: symmetric table, independently derived, same 3-infeasible/5-feasible split.
+
+**Verification strategy -- three layers, strongest last:**
+1. Direct `evaluate()` calls at each of the 8 hand-derived schedules (with `w` set to the true product) -- confirms the formula matches the hand-computed table exactly.
+2. Full brute-force over all 32 states (8 x-patterns x 4 w-combinations) -- confirms the *minimum-energy* `w` for every schedule is exactly the true product, proving the linking penalty genuinely incentivizes the optimizer toward correct `w`, not just "gives the right answer when handed it."
+3. Structural check against the real 5-generator RTS-GMLC sample -- confirms `Q` stays upper-triangular and `n_vars` grows exactly as `N*T + N*(T-1)` when applied to real data, not just the tiny synthetic case.
+
+**Built:**
+- `fluxq/qubo/constraints.py::add_transition_linking()` -- the Rosenberg substitution penalty.
+- `fluxq/qubo/constraints.py::add_mut_constraint()` / `add_mdt_constraint()` -- replacing the `NotImplementedError` stubs from Phase 0.
+- `fluxq/qubo/builder.py` -- `QUBOBuilder` gained a constructor-time `enable_mut_mdt` flag (deliberately constructor-time, not build()-time, since `n_vars` must be settled before `build()` is ever called -- e.g. before sizing a brute-force search), a `w_idx()` helper, and `suggest_lambda_link()` (a heuristic bound: a single wrong `w` can mask up to `(MUT-1)` MUT terms and `(MDT-1)` MDT terms simultaneously, so `lambda_link` must exceed the worst-case combined savings from cheating).
+- `LambdaConfig` gained a `lambda_link` field.
+- `tests/test_mut_mdt_constraints.py` -- 10 new tests covering all three verification layers above.
+- `tests/test_constraints.py` -- removed the 2 now-obsolete stub tests (`test_mut_raises`, `test_mdt_raises`); `add_ramp_constraint` remains the one genuine Phase 1 stub left.
+
+**Notable design win, not planned in advance:** `validator.py` needed zero changes. `decode_solution()` and every function built on it already slice `x[:N*T]` defensively -- a Phase 0 design choice made for a different reason (robustness) that turned out to make the auxiliary `w` block, appended after position `N*T`, completely invisible to every existing reporting function without touching them at all.
+
+**Result:**
+```
+58 passed in 1.61s   (51 Phase 0/RTS-GMLC + 7 loader + 10 new MUT/MDT - 2 removed stubs)
+```
+
+Confirmed on the real machine after an unrelated environment hiccup (a second Python installation, 3.14, had taken priority on PATH ahead of the miniconda environment everything was actually installed in -- resolved by calling miniconda's `python.exe` directly; the PATH ordering itself deliberately left alone rather than untangling four separate Python installs mid-flow).
+
+**Next:** wire MUT/MDT into a real solver run against the full 5-generator RTS-GMLC sample with real demand -- brute force stops being viable once auxiliary variables are added at any real scale (5 generators x 4 timesteps with MUT/MDT is already 35 variables, 2^35 states, far past brute-force range), so this is also the natural forcing function to finally start Simulated Annealing, still open since the very first FluxQ project brief.
+
+---
+
 ## 2026-07-26 -- First real-data verification: 5 real RTS-GMLC generators, hand-reasoning confirmed by brute force
 
 **Context:** after yesterday's full repository restart (new repo, clean single-layer folder structure, all verified Phase 0 code carried over unchanged), today's goal was to stop relying on synthetic toy data entirely and wire in a real, published grid dataset from the ground up -- starting with a small, deliberately hand-verifiable slice before scaling to anything larger.
