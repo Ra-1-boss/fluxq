@@ -226,22 +226,14 @@ class TestSpinningReserve:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 stubs raise NotImplementedError
+# Phase 1 stubs still raising NotImplementedError
 # ---------------------------------------------------------------------------
+# add_mut_constraint and add_mdt_constraint used to be tested here as
+# stubs. They are now fully implemented -- see
+# tests/test_mut_mdt_constraints.py for their real test coverage. Only
+# add_ramp_constraint remains a genuine stub.
 
 class TestPhase1Stubs:
-    def test_mut_raises(self):
-        from fluxq.qubo.constraints import add_mut_constraint
-        Q = np.zeros((4, 4))
-        with pytest.raises(NotImplementedError):
-            add_mut_constraint(Q, make_toy_generators(), T=4, lambda_3=1.0)
-
-    def test_mdt_raises(self):
-        from fluxq.qubo.constraints import add_mdt_constraint
-        Q = np.zeros((4, 4))
-        with pytest.raises(NotImplementedError):
-            add_mdt_constraint(Q, make_toy_generators(), T=4, lambda_4=1.0)
-
     def test_ramp_raises(self):
         from fluxq.qubo.constraints import add_ramp_constraint
         Q = np.zeros((4, 4))

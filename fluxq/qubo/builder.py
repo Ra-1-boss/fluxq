@@ -34,7 +34,13 @@ import numpy as np
 
 from ..data.grid_builder import Generator
 from .objective import add_fuel_cost, add_startup_cost, add_shutdown_cost
-from .constraints import add_power_balance, add_spinning_reserve
+from .constraints import (
+    add_power_balance,
+    add_spinning_reserve,
+    add_transition_linking,
+    add_mut_constraint,
+    add_mdt_constraint,
+)
 from .validator import (
     evaluate,
     decode_solution,
@@ -82,12 +88,13 @@ class LambdaConfig:
     """
     lambda_1: float = 1.0    # power balance
     lambda_2: float = 0.5    # spinning reserve
-    lambda_3: float = 1.0    # MUT (Phase 1)
-    lambda_4: float = 1.0    # MDT (Phase 1)
-    lambda_5: float = 0.5    # ramp rate (Phase 1)
+    lambda_3: float = 1.0    # MUT
+    lambda_4: float = 1.0    # MDT
+    lambda_5: float = 0.5    # ramp rate (Phase 1, still a stub)
+    lambda_link: float = 1.0 # forces w_{i,t} = x_{i,t-1}*x_{i,t} (MUT/MDT only)
 
     def __post_init__(self) -> None:
-        for name in ("lambda_1", "lambda_2", "lambda_3", "lambda_4", "lambda_5"):
+        for name in ("lambda_1", "lambda_2", "lambda_3", "lambda_4", "lambda_5", "lambda_link"):
             v = getattr(self, name)
             if v < 0:
                 raise ValueError(f"LambdaConfig.{name} must be ≥ 0, got {v}")
@@ -133,6 +140,7 @@ class QUBOBuilder:
         T: int,
         dt: float = 1.0,
         initial_state: Optional[List[int]] = None,
+        enable_mut_mdt: bool = False,
     ) -> None:
         if len(generators) == 0:
             raise ValueError("At least one generator is required.")
@@ -145,7 +153,24 @@ class QUBOBuilder:
         self.N: int = len(generators)
         self.T: int = T
         self.dt: float = dt
-        self.n_vars: int = self.N * self.T
+        self.enable_mut_mdt: bool = enable_mut_mdt
+
+        # n_vars_real is always N*T -- the real x_{i,t} commitment
+        # variables. When MUT/MDT is enabled, n_vars grows to include the
+        # auxiliary w_{i,t} = x_{i,t-1}*x_{i,t} block used to keep the MUT/
+        # MDT penalties strictly quadratic (see constraints.py). This is a
+        # structural, constructor-time decision rather than a build()-time
+        # flag, since n_vars must be settled before build() is ever called
+        # (e.g. before sizing a brute-force search or a solver's qubit
+        # count) -- unlike include_reserve, which only changes what
+        # penalties get added to an already-sized Q.
+        self.n_vars_real: int = self.N * self.T
+        if self.enable_mut_mdt:
+            self.n_vars_w: int = self.N * max(self.T - 1, 0)
+        else:
+            self.n_vars_w = 0
+        self.n_vars: int = self.n_vars_real + self.n_vars_w
+
         self.initial_state: List[int] = (
             list(initial_state) if initial_state is not None else [0] * self.N
         )
@@ -185,6 +210,32 @@ class QUBOBuilder:
             raise IndexError(f"Timestep {t} out of range [0, {self.T - 1}].")
         return i * self.T + t
 
+    def w_idx(self, i: int, t: int) -> int:
+        """
+        QUBO index for the auxiliary linking variable
+        w_{i,t} = x_{i,t-1} * x_{i,t}.
+
+        Only valid when the builder was constructed with
+        ``enable_mut_mdt=True``. t ranges over [1, T) -- there is no
+        w_{i,0}, since the t=0 boundary is handled directly in terms of
+        the real x_{i,0} variable (see constraints.py).
+
+        Parameters
+        ----------
+        i : int  — generator index in [0, N)
+        t : int  — timestep index in [1, T)
+        """
+        if not self.enable_mut_mdt:
+            raise RuntimeError(
+                "w_idx() only applies when the builder was constructed "
+                "with enable_mut_mdt=True."
+            )
+        if not (0 <= i < self.N):
+            raise IndexError(f"Generator index {i} out of range [0, {self.N - 1}].")
+        if not (1 <= t < self.T):
+            raise IndexError(f"w_idx requires t in [1, {self.T - 1}], got {t}.")
+        return self.n_vars_real + i * (self.T - 1) + (t - 1)
+
     def idx_to_gen_time(self, idx: int):
         """Inverse of var_idx: return (i, t) for a given QUBO index."""
         if not (0 <= idx < self.n_vars):
@@ -205,11 +256,14 @@ class QUBOBuilder:
         """
         Build the full QUBO matrix Q.
 
-        Phase 0 contents
-        ----------------
+        Contents
+        --------
         1. Objective: fuel cost, startup cost, shutdown cost.
         2. Power balance penalty (equality, all timesteps).
         3. [Optional] Spinning reserve penalty.
+        4. [If enable_mut_mdt=True at construction] Transition linking,
+           MUT, and MDT penalties -- see constraints.py for the full
+           derivation.
 
         Parameters
         ----------
@@ -261,6 +315,19 @@ class QUBOBuilder:
                 )
             add_spinning_reserve(
                 Q, self.generators, demand, reserve, self.T, lambdas.lambda_2
+            )
+
+        if self.enable_mut_mdt:
+            add_transition_linking(
+                Q, self.generators, self.T, self.n_vars_real, lambdas.lambda_link
+            )
+            add_mut_constraint(
+                Q, self.generators, self.T, self.n_vars_real,
+                lambdas.lambda_3, self.initial_state,
+            )
+            add_mdt_constraint(
+                Q, self.generators, self.T, self.n_vars_real,
+                lambdas.lambda_4, self.initial_state,
             )
 
         self._Q = Q
@@ -356,6 +423,51 @@ class QUBOBuilder:
         min_P_sq = min(gen.P_max for gen in self.generators) ** 2
         return max_obj / min_P_sq
 
+    def suggest_lambda_link(self, lambda_3: float = 1.0, lambda_4: float = 1.0) -> float:
+        """
+        Estimate a safe lower bound for λ_link (the transition-linking
+        penalty that forces w_{i,t} = x_{i,t-1}*x_{i,t}).
+
+        Derivation
+        ----------
+        A single incorrect w_{i,t} can simultaneously mask every MUT and
+        MDT violation term that references it -- up to (MUT_i - 1) MUT
+        terms and (MDT_i - 1) MDT terms for that (generator, timestep).
+        λ_link must exceed the maximum possible "savings" from doing this,
+        or the optimizer could find it cheaper to let w disagree with the
+        true product than to genuinely satisfy MUT/MDT.
+
+        This is a heuristic bound, not a formal guarantee -- same caveat
+        as suggest_lambda(). Verify with validate() after solving.
+
+        Parameters
+        ----------
+        lambda_3 : float
+            The λ₃ (MUT) value you intend to use.
+        lambda_4 : float
+            The λ₄ (MDT) value you intend to use.
+
+        Returns
+        -------
+        float
+            Suggested minimum value for LambdaConfig.lambda_link.
+
+        Raises
+        ------
+        RuntimeError
+            If the builder was not constructed with enable_mut_mdt=True.
+        """
+        if not self.enable_mut_mdt:
+            raise RuntimeError(
+                "suggest_lambda_link() only applies when the builder was "
+                "constructed with enable_mut_mdt=True."
+            )
+        max_masked = max(
+            (gen.MUT - 1) * lambda_3 + (gen.MDT - 1) * lambda_4
+            for gen in self.generators
+        )
+        return max(max_masked, 1.0)
+
     def validate(self) -> Dict[str, Any]:
         """Run structural validation on the built QUBO matrix."""
         return check_qubo_matrix(self.Q, self.n_vars)
@@ -367,16 +479,23 @@ class QUBOBuilder:
         Useful for scaling analysis (Phase 4 — QUBO size vs grid size).
         """
         n = self.n_vars
-        return {
+        d = {
             "n_generators": self.N,
             "n_timesteps": self.T,
+            "enable_mut_mdt": self.enable_mut_mdt,
+            "n_vars_real": self.n_vars_real,
+        }
+        if self.enable_mut_mdt:
+            d["n_vars_auxiliary_w"] = self.n_vars_w
+        d.update({
             "n_variables": n,
             "Q_shape": (n, n),
             "Q_entries": n * n,
             "Q_size_MB": round(n * n * 8 / 1e6, 4),   # float64
             "state_space_bits": n,
             "state_space_approx": f"2^{n} ≈ {2**n:,}" if n <= 40 else f"2^{n} (too large to enumerate)",
-        }
+        })
+        return d
 
     def print_info(self) -> None:
         """Print a formatted summary of QUBO problem dimensions."""
