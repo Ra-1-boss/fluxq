@@ -4,6 +4,44 @@ A running record of what's been read, built, and understood -- in the order it h
 
 ---
 
+## 2026-07-29 (later) -- Phase 1: Simulated Annealing, FluxQ's first heuristic solver
+
+**Context:** enabling MUT/MDT earlier today pushed the real 5-generator RTS-GMLC problem to 35 variables once auxiliary linking variables are included -- 2^35 ~ 34.4 billion states, nowhere near brute force's practical ceiling of 25 variables. Every solver built so far has been provably exact on small cases; this is the first one that trades that guarantee for the ability to search problems of real size at all.
+
+**The honest epistemic split, decided before writing any code:** brute force can prove optimality up to ~25 variables. Beyond that, there is no ground truth to check against. So every test and every demo built on Simulated Annealing keeps those two claims strictly separate -- "verified against known ground truth" only applies where brute force can still reach; past that, the only honest claim is "feasible, low-cost, and consistent," never "proven optimal."
+
+**Refactor first:** `brute_force()` had been duplicated identically inside both `demos/toy_brute_force.py` and `demos/rts_gmlc_5gen_brute_force.py`. Extracted into `fluxq/solvers/brute_force.py` -- both so it has its own test coverage, and so SA's tests can use the exact same verified ground-truth implementation rather than a second copy that could quietly drift.
+
+**Algorithm:** standard Simulated Annealing -- propose a random single-bit flip, accept immediately if it improves energy, accept anyway with probability `exp(-delta_E / T)` if it doesn't (this is what lets early iterations escape local minima), cool `T` geometrically over the run. `T0` (starting temperature) is estimated automatically by sampling a short unconstrained random walk and using the mean absolute energy change observed -- a heuristic, documented as one, same as `suggest_lambda()`. Multiple independent restarts (5 by default) are run and the best result kept, since any single run can land in a worse local minimum by chance.
+
+**Verification, layer 1 -- exact match on the toy problem:** built the original Phase 0 toy problem, ran SA with 5 restarts / 5,000 iterations. Result: exact match to brute force's true optimum, energy **and** the schedule itself, not just a close number.
+
+**Verification, layer 2 -- a real gap, investigated rather than hidden:** ran the same check against the real RTS-GMLC 5-generator sample (n_vars=20, still brute-forceable). At 8,000 iterations, SA landed close but not exact -- a relative gap of about 0.0018%. Rather than treat this as noise, increased the iteration budget systematically: 8,000 (gap), 20,000 (exact), 50,000 (exact), 100,000 (exact). The real explanation: this problem's energy scale is in the billions (genuine dollar costs), versus the toy problem's thousands -- proportionally more search steps are needed to converge exactly at that scale. Not a bug; a real, now-documented property of how SA's convergence interacts with a problem's energy magnitude. 20,000 iterations is the number used everywhere in this codebase for real RTS-GMLC-scale problems as a result.
+
+**A bug caught in the verification code itself, not the solver:** the first draft of the test documenting the 8,000-iteration gap asserted the gap would be `< 1.0` -- a placeholder that didn't reflect the actual measured value (~18,555). Running the test caught this immediately, since it's exactly the kind of test designed to fail loudly rather than pass quietly on a wrong assumption. Fixed to assert against the real observed magnitude, with margin, rather than a number that was never actually checked.
+
+**Built:**
+- `fluxq/solvers/brute_force.py` -- the extracted, now-shared, now-tested ground-truth solver.
+- `fluxq/solvers/sa_solver.py` -- `simulated_annealing()`, `estimate_initial_temperature()`.
+- `tests/test_brute_force.py` -- 5 tests.
+- `tests/test_sa_solver.py` -- 11 tests: exact-match verification on both the toy problem and real data, the honestly-bounded 8,000-iteration gap, reproducibility checks, input validation.
+- `demos/sa_beyond_brute_force.py` -- runs the real 5-generator RTS-GMLC sample with MUT/MDT enabled (35 variables), reports the schedule, and states plainly in its own output that this result is feasible and low-cost, not proven optimal -- the demo narrates its own epistemic limits rather than overclaiming.
+
+**Result:**
+```
+74 passed in 3.89s   (67 confirmed here + 7 loader tests picked up locally)
+
+sa_beyond_brute_force.py:
+  n_vars = 35 (2^35 ~ 34.4 billion states -- 1,024x past brute force's ceiling)
+  SA (10 restarts, 40,000 iterations): 4.24s
+  Best energy: -1,036,464,928.69
+  Max power imbalance: 0.00 MW (exact power balance achieved)
+```
+
+**Next:** wire this into a real classical LP benchmark (`fluxq/solvers/classical_lp.py`, still an empty stub) so SA's results have a second point of comparison beyond brute force -- and, further out, this is the natural point to start Phase 2 (QAOA via Qiskit), now that there's an honest classical baseline for it to eventually be measured against.
+
+---
+
 ## 2026-07-29 -- Phase 1: MUT/MDT constraints implemented, the research gap since 2026-07-04 finally closed
 
 **Context:** this is the actual research contribution FluxQ set out to make. Glover's QUBO tutorial (read 2026-07-04) has no worked example for constraints that couple a binary variable to itself across multiple future timesteps -- every example in it is a single-timestep constraint. Minimum Up Time and Minimum Down Time need exactly that: "if a generator starts at t, it must stay on through t+1, ..., t+MUT-1." This entry is the full derivation, the bug caught while deriving it, and the verification against real generator data.
