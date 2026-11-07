@@ -336,3 +336,128 @@ def solution_report(
     lines.append(sep)
 
     return "\n".join(lines)
+
+
+def check_mut_mdt_feasibility(
+    x: np.ndarray,
+    generators: "List[Generator]",
+    T: int,
+    initial_state: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """
+    Independently check whether a decoded commitment schedule satisfies
+    every generator's MUT/MDT requirements -- by directly walking the
+    0/1 schedule itself, with NO reference to any QUBO matrix or penalty
+    value.
+
+    Why this exists
+    ----------------
+    Everywhere else in FluxQ, "does this schedule satisfy MUT/MDT" is
+    answered by checking whether the QUBO's MUT/MDT penalty terms
+    evaluate to zero (see test_mut_mdt_constraints.py). That's the right
+    check when verifying the QUBO FORMULATION itself is correct. But
+    when checking whether a SPECIFIC SOLUTION found by a heuristic
+    solver is actually feasible -- especially at a scale too large to
+    brute-force verify -- checking it with only the same machinery that
+    produced it is not independent evidence. This function is a second,
+    completely separate method: it never touches Q, only the decoded
+    schedule, so agreement between this and the QUBO-based check is
+    genuine corroboration, not circular reasoning.
+
+    This function caught a real problem the first time it was used: a
+    schedule from an earlier session, previously described as "feasible"
+    (based only on exact power balance), was actually MUT-infeasible for
+    two generators -- see docs/research-log.md for the full
+    investigation, including the surprising finding that the real cause
+    was not an under-weighted penalty (fixed, and it didn't change the
+    result) but a demand profile that structurally conflicted with full
+    MUT compliance no matter how the weights were set.
+
+    Parameters
+    ----------
+    x : np.ndarray, shape (N*T,) or longer
+        Binary solution vector. Only the first N*T entries are used,
+        matching every other function in this module -- callers never
+        need to slice off any auxiliary MUT/MDT linking variables
+        appended after position N*T.
+    generators : list of Generator
+    T : int
+    initial_state : list of int, optional
+        Default: all 0 (all generators start OFF).
+
+    Returns
+    -------
+    dict with keys:
+        'feasible' : bool -- True iff zero violations were found.
+        'violations' : list of dict, one per violation, each with keys
+            'generator', 'type' ('MUT' or 'MDT'), 'start_t', and a
+            human-readable 'message'.
+
+    Notes on the horizon boundary
+    ------------------------------
+    A run of ON or OFF timesteps that reaches all the way to the end of
+    the visible horizon is handled two different ways depending on
+    whether it's already long enough:
+      - If the observed run length already meets MUT/MDT, it's
+        confirmed satisfied -- the fact that it *also* continues past
+        what's visible doesn't undo that.
+      - If the observed run length falls short AND it reaches the end
+        of the horizon (rather than ending via a genuine transition
+        back), it's treated as inconclusive, not a violation -- matching
+        the same "can't penalize what's beyond the horizon" convention
+        used throughout constraints.py.
+      - If the run falls short AND it ends via a genuine, fully-observed
+        transition back, that's a real, confirmed violation.
+    An earlier draft of this function conflated the first and second
+    cases (checking only whether the run ended within the horizon,
+    before checking whether it was already long enough), which produced
+    the right final feasible/infeasible answer on every hand-derived
+    test case by coincidence, but for the wrong reason -- fixed before
+    being trusted as an independent check. See docs/research-log.md.
+    """
+    if initial_state is None:
+        initial_state = [0] * len(generators)
+
+    N = len(generators)
+    schedule = x[: N * T].reshape(N, T).astype(int)
+
+    violations: List[Dict[str, Any]] = []
+
+    for i, gen in enumerate(generators):
+        full_seq = [initial_state[i]] + list(schedule[i])
+
+        t = 1
+        while t < len(full_seq):
+            if full_seq[t] == full_seq[t - 1]:
+                t += 1
+                continue
+
+            new_state = full_seq[t]
+            run_start_idx = t - 1
+
+            run_len = 1
+            tt = t + 1
+            while tt < len(full_seq) and full_seq[tt] == new_state:
+                run_len += 1
+                tt += 1
+            hit_boundary = (tt == len(full_seq))
+
+            min_required = gen.MUT if new_state == 1 else gen.MDT
+
+            if run_len < min_required and not hit_boundary:
+                kind = "MUT" if new_state == 1 else "MDT"
+                state_word = "on" if new_state == 1 else "off"
+                violations.append({
+                    "generator": gen.name,
+                    "type": kind,
+                    "start_t": run_start_idx,
+                    "message": (
+                        f"{gen.name}: {'started' if new_state == 1 else 'shut down'} "
+                        f"at t={run_start_idx}, stayed {state_word} for only "
+                        f"{run_len} timestep(s), needs {min_required} ({kind})."
+                    ),
+                })
+
+            t += 1
+
+    return {"feasible": len(violations) == 0, "violations": violations}

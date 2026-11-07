@@ -468,6 +468,55 @@ class QUBOBuilder:
         )
         return max(max_masked, 1.0)
 
+    def suggest_lambda_mut_mdt(self) -> float:
+        """
+        Heuristic lower bound for lambda_3/lambda_4 (MUT/MDT penalty
+        weights). Must dominate the maximum possible fuel-cost savings
+        achievable by cutting any generator's run short somewhere within
+        the full horizon -- same spirit as suggest_lambda(), same
+        heuristic-not-guarantee caveat.
+
+        IMPORTANT -- what this does and does not fix. Discovered while
+        investigating a real infeasible result: this corrects an
+        UNDER-WEIGHTED penalty, where MUT/MDT checks that ARE possible
+        within the horizon were being ignored because their penalty was
+        negligible next to the power balance term's scale. It does NOT
+        fix two separate, structural problems that no weight can solve:
+
+          1. A generator whose MUT/MDT exceeds the horizon T has some or
+             all of its required checks fall entirely outside what's
+             visible -- no penalty weight can enforce a check that never
+             gets asked.
+          2. A demand profile can structurally conflict with full MUT/MDT
+             compliance regardless of weighting -- if the only way to
+             satisfy a generator's minimum run length would overshoot
+             power balance by more than the MUT/MDT penalty could ever
+             be worth avoiding, the optimizer will correctly choose to
+             violate MUT/MDT instead, no matter how large lambda_3/4 get.
+             This is exactly what happened investigating a real 5-
+             generator schedule -- see docs/research-log.md. The fix
+             there was a different demand profile, not a different
+             weight.
+
+        Always run validator.check_mut_mdt_feasibility() on the actual
+        solution found -- it is the only way to know which of these
+        situations (if any) actually occurred for a specific result.
+
+        Raises
+        ------
+        RuntimeError
+            If the builder was not constructed with enable_mut_mdt=True.
+        """
+        if not self.enable_mut_mdt:
+            raise RuntimeError(
+                "suggest_lambda_mut_mdt() only applies when the builder "
+                "was constructed with enable_mut_mdt=True."
+            )
+        max_savings = max(
+            gen.c_fuel * gen.P_max * self.dt for gen in self.generators
+        ) * self.T
+        return max(max_savings, 1.0)
+
     def validate(self) -> Dict[str, Any]:
         """Run structural validation on the built QUBO matrix."""
         return check_qubo_matrix(self.Q, self.n_vars)

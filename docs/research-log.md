@@ -3,6 +3,131 @@
 A running record of what's been read, built, and understood -- in the order it happened. This is the primary log for FluxQ's development. Every entry is dated and stands on its own.
 
 ---
+## 2026-11-07: Why SA left MUT/MDT violations at N=15, T=8 (225 variables)
+
+**Status:** investigation closed for now. SA tuning stopped. The formulation problem
+found below is fixed in the demo; the search problem is open and documented.
+
+### Instance
+
+- First 15 dispatchable RTS-GMLC units, T = 8, flat demand, `demand[0]` = 668.44 MW
+  (68.0% of sum P_max = 983.0 MW), initial state all OFF.
+- 225 variables: 120 real x plus 105 auxiliary w (w = x[t-1]*x[t]).
+- Weights: lambda_1 = 3,167.7 (1.5 x suggest_lambda() = 2,112);
+  lambda_3 = lambda_4 = 7.973e4 (suggest_lambda_mut_mdt()).
+- lambda_link was 2 x lambda_3 (hand-set in the demos) until finding 1 below;
+  then suggest_lambda_link(lam_mm, lam_mm) = 8.77e5 (11 x lambda_3).
+- Q drops the constant lambda_1 * sum(D_t^2) = 11,323,043,393.74, so raw energies are
+  about -1.13e10. Energy + that constant = balance penalty + costs + MUT/MDT + link.
+
+### Reference point: best constant schedule
+
+Enumerating all 2^15 constant schedules (each unit ON or OFF for all 8 steps, w set to the
+true product) gives, as the lowest energy found among them:
+
+- Energy -11,322,757,836.93 (identical at lambda_link = 2 x and 11 x lambda_3, since
+  a link-consistent w has zero link penalty).
+- 8 units ON (101_CT_1, 101_CT_2, 102_STEAM_3, 102_STEAM_4, 107_CC_1, 113_CT_1,
+  113_CT_2, 115_STEAM_1), ON capacity 669.0 MW, max |imbalance| 0.56 MW.
+- Independent validator: 0 MUT/MDT violations. True cost 277,609.61.
+- Decomposition check: energy + constant - balance term - link term equals builder cost
+  exactly (difference 0.00), so Q contains no terms beyond costs, balance, link, MUT/MDT.
+
+This is an upper bound on the true minimum, not a proof of optimality; non-constant
+schedules are not enumerated.
+
+### Finding 1: lambda_link = 2 x lambda_3 was too small (formulation, not search)
+
+`w_soundness_check.py` uses the fact that Q has no w-w off-diagonal entries, so for fixed
+x the energy-minimising w is computed bit by bit. 20,000 schedules per family:
+
+| lambda_link | cheat bits (uniform / sparse) | samples with any cheat | max single gain |
+|---|---|---|---|
+| 2 x lambda_3 | 10.50% / 4.43% | 100% / 99.4% | 4.00 x lambda_3 |
+| 4 x lambda_3 | 2.02% / 0.90% | 88.6% / 60.8% | 2.00 x lambda_3 |
+| 7 x lambda_3 | 0 / 0 | 0 / 0 | 0 |
+| 10 x lambda_3 | 0 / 0 | 0 / 0 | 0 |
+
+"Cheat" means the product x[t-1]*x[t] is 0 but the minimising w is 1.
+
+- Hand derivation (from constraints.py, matched by the table): a wrong w = 1 hides up
+  to min(MUT-1, T-2) terms of MUT/MDT penalty, at most 6 x lambda_3 here, while costing
+  only 1 x lambda_link (one ON neighbour) or 3 x lambda_link (none). So lambda_link must
+  exceed about 6 x lambda_3 at T = 8.
+- At 2 x lambda_3 the best constant schedule has two exact ties (101_STEAM_3 and
+  101_STEAM_4, t = 1, both MUT = 8): 3 x lambda_link = 6 x lambda_3.
+- suggest_lambda_link() returns max((MUT-1)*l3 + (MDT-1)*l4) = 11 x lambda_3 here. That
+  is safe but looser than needed, because it ignores the horizon truncation. Its
+  arguments default to 1.0, so calling it without lambda_3/lambda_4 returns 11, which
+  is meaningless next to lambda_3 = 7.97e4.
+- Not established: that sampling proves soundness for every schedule (it does not);
+  why the earlier brute-force tests up to 20 variables missed this. My hypothesis is
+  that short horizons keep the cheat gain below lambda_link; not verified.
+
+### Finding 2: the demo's violation classifier hides real violations
+
+`check_mut_mdt_feasibility` reports only fully observed violations (a run that reaches
+the end of the horizon is skipped). `classify_violations` in the scaling demo labels any
+MUT/MDT >= T as "horizon-limited". Every MUT = 8 unit is therefore mislabelled, and
+real violations are dropped from the "genuine" count: 5 of 21 and 9 of 31 in the runs
+below. Report the validator's total.
+
+### Finding 3: the seeded-start test did not test the seed
+
+`simulated_annealing` estimates T0 with `estimate_initial_temperature`, which draws its
+own random state and ignores `initial_x`. T0 came out at 4.77e7 (4.84e7 on the corrected Q),
+far above the energy scale near a feasible state, so the seed was randomised early.
+
+Single-flip dE from the best constant schedule, measured on the old Q (lambda_link =
+2 x lambda_3, so link-related numbers are lower than on the corrected Q): 0 of 120 x flips
+lower the energy (min +4.91e5, median 9.63e6, max 3.98e8); w flips are whole multiples of
+lambda_3. The largest x flip is consistent with lambda_1 x (355 MW)^2.
+
+### Results: three SA configurations (15 restarts x 250,000 iterations, seed 23, random start)
+
+| Run | Q | Schedule | Best energy | Gap above best constant | Violations (validator) | Max imbalance | True cost |
+|---|---|---|---|---|---|---|---|
+| A | lambda_link = 2 x l3 (unsound) | default | -11,321,450,240.87 | 1,307,596 | not recorded (10-13 "genuine" by the demo's label) | n/r | n/r |
+| B | lambda_link = 11 x l3 | default (T0 4.84e7, T_min 1e-3) | -11,319,907,323.97 | 2,850,513 | 21 | 5.44 MW | 384,556.07 |
+| C | lambda_link = 11 x l3 | T0 1e7, T_min 1e4 | -11,317,570,160.22 | 5,187,677 | 31 | 1.56 MW | 436,039.73 |
+
+Run B decomposition of the gap: MUT/MDT penalty 2,631,049 (about 33 x lambda_3, 92%),
+balance 112,518 (4%), true cost 106,946 (4%). Its 105 w bits are all consistent.
+
+Caveats:
+- One seed per configuration. Restart-to-restart spread inside a run (about 7.7e6 in B,
+  2.6e7 in C) exceeds the differences between runs, so B vs C should not be ranked.
+- Run C is confounded by my T_min choice: its final state has one inconsistent w bit
+  (link penalty 877,016 = one lambda_link) that a low-temperature polish would have fixed.
+  It was not rerun with a lower T_min.
+- Run A used the unsound Q, so it is not directly comparable to B and C.
+
+### Interpretation (hypothesis, not demonstrated)
+
+SA's best states are not MUT/MDT-feasible, while a feasible, better, cheaper schedule
+exists, so this is a search failure on this instance for these configurations. A plausible
+mechanism: the squared balance penalty makes any single flip cost at least about
+lambda_1 x P_i^2 (about 4.6e5 for a 12 MW unit, 1.8e7 for a 76 MW unit), more than the
+penalty a MUT/MDT violation removes (roughly 1-7 x lambda_3 = 8e4 to 5.6e5), and the
+balance-feasible states are sparse (669.0 MW of ON capacity vs 668.44 MW demand).
+Untested: balance-preserving moves, a low T_min with a matched T0, incremental dE.
+
+### Decisions and open items
+
+- Stopped tuning plain SA. Claim to carry forward: "plain single-flip SA with geometric
+  cooling, three configurations, one seed each, did not reach a MUT/MDT-feasible
+  schedule at N=15, T=8", not "SA cannot solve this".
+- Next: `classical_lp.py` baseline, QUBO size table, then QAOA.
+- Open: add a pytest for w soundness at T >= 6 (the 79 existing tests did not catch
+  finding 1); make suggest_lambda_link() horizon-aware; fix the demo classifier; read
+  objective.py/grid_builder.py/loader.py (not read in this investigation).
+
+### Reproduction
+
+Python 3.13, numpy + pytest, Windows. SA seed 23; soundness sampling seed 0. Scripts:
+`demos/constant_schedule_check.py`, `demos/sa_scale_diagnostic.py`,
+`demos/w_soundness_check.py`, `demos/sa_rerun_audit.py` (the last three were written
+during this investigation).
 
 ## 2026-07-29 (later) -- Phase 1: Simulated Annealing, FluxQ's first heuristic solver
 
