@@ -3,6 +3,35 @@
 A running record of what's been read, built, and understood -- in the order it happened. This is the primary log for FluxQ's development. Every entry is dated and stands on its own.
 
 ---
+## 2026-11-09: Classical MILP baseline at N=15, T=8: the best constant schedule is the minimum
+
+**Question.** Is the best constant schedule (-11,322,757,836.93) merely an upper bound, or is it the minimum QUBO energy for this instance? SA results were being compared against an unproven reference.
+
+**Method** (`fluxq/solvers/classical_lp.py`, scipy `milp` / HiGHS).
+- Variables: x binary; continuous start/shutdown indicators and per-pair MUT/MDT violation variables, all with nonnegative costs, so the minimiser sets them to max(0, .). Fuel, SU, SD, MUT/MDT (only fully observed pairs) and `initial_state` handling follow `objective.py` and `constraints.py`.
+- Restricted to w = x[t-1]*x[t] ("product schedules").
+- The squared imbalance is replaced by tangent lines s^2 >= 2as - a^2, placed at every achievable subset-sum imbalance within +/-11.87 MW (256 tangents in total) plus coarse tangents outside. Tangents only under-estimate, so the solver's dual bound is a valid lower bound.
+- Solved on the shifted objective; E_Q = shifted - lambda_1*sum(D^2) - sum(SD_i for units starting ON).
+
+**Result** (lambda_1 = 3,167.7, lambda_3 = lambda_4 = 79,729, lambda_link = 11*lambda_3 = 8.7702e5, 225 variables).
+- HiGHS status Optimal, mip_gap 0.0.
+- Schedule energy -11,322,757,836.93; dual bound -11,322,757,836.93; equal to the best constant schedule to the cent.
+- 8 units ON at every step, max imbalance 0.56 MW, 0 MUT/MDT violations, true cost 277,609.61.
+- `window_certifies` = True: lambda_1 * window^2 exceeds the schedule's shifted objective, so the bracket is not widened by tangent resolution.
+- Solver time was not recorded.
+
+**Checks.** 4 pytest cases on a 3-unit, T=5 instance with MUT/MDT > 1, for all-OFF and partly-ON `initial_state`: the module's energy formula matches `x @ Q @ x` on 200 random schedules each, and the MILP optimum equals the minimum over all 2^15 product schedules.
+
+**What this supports.** For this instance, the minimum QUBO energy over product schedules is the constant schedule's, up to solver tolerances. SA's best default run (2,850,513 above) and the T0=1e7 run (5,187,677 above) are therefore gaps to the minimum, not just to an upper bound.
+
+**What it does not support.**
+- The joint minimum over (x, w) equals this only if lambda_link is large enough. A derivation from `constraints.py` gives lambda_link >= max_i((MUT_i-1)*lambda_3 + (MDT_i-1)*lambda_4). It has not been tested on a joint (x, w) enumeration.
+- One instance with a flat demand profile; a constant schedule is favoured by construction.
+- The MILP may return a different schedule with the same energy; the schedule's identity was not compared.
+- Nothing about SA in general, or about QAOA.
+
+**Open.** QUBO size table; `w == product` pytest for T >= 6 and a horizon-aware `suggest_lambda_link`; QAOA plan at laptop-simulable sizes.
+
 ## 2026-11-07: Why SA left MUT/MDT violations at N=15, T=8 (225 variables)
 
 **Status:** investigation closed for now. SA tuning stopped. The formulation problem
