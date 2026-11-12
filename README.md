@@ -264,7 +264,17 @@ w_{i,t} ∈ {0,1}    auxiliary, only when MUT/MDT is enabled; t ≥ 1
 ```
 
 For N generators and T timesteps: **N × T** real variables, indexed `i * T + t`, plus **N × (T−1)** auxiliary `w` variables when MUT/MDT is enabled.
+Size of the QUBO (from `QUBOBuilder.info()`; Q MB is the dense float64 matrix):
 
+| N | T | x vars | w vars | total with w | Q MB (with w) |
+|---|---|---|---|---|---|
+| 5 | 8 | 40 | 35 | 75 | 0.045 |
+| 15 | 8 | 120 | 105 | 225 | 0.405 |
+| 15 | 24 | 360 | 345 | 705 | 3.9762 |
+| 72 | 8 | 576 | 504 | 1080 | 9.3312 |
+| 72 | 24 | 1728 | 1656 | 3384 | 91.6116 |
+
+The full table, including the no-MUT/MDT sizes, is in `docs/research-log.md`.
 ### Objective
 
 ```

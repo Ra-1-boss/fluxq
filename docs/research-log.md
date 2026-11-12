@@ -3,6 +3,50 @@
 A running record of what's been read, built, and understood -- in the order it happened. This is the primary log for FluxQ's development. Every entry is dated and stands on its own.
 
 ---
+## 2026-11-12: lambda_link soundness test on small instances; QUBO size table
+
+**Question.** Does `suggest_lambda_link` give a lambda_link large enough that the joint (x, w) minimum equals the product-schedule minimum? This was the open item from the 2026-11-09 entry.
+
+**Method** (`tests/test_link_soundness.py`, numpy only).
+- The test asserts that Q is upper-triangular and has no w-w couplings. For fixed x, E is then linear in each w bit, so the best w bit is 1 exactly when its coefficient is negative. The exact joint minimum is the minimum over all x of that, with no product assumption.
+- The shortcut is validated against full enumeration of every x and every w (2 units, T=4, 14 variables), at lambda_link = suggested and at 2*lambda_3. The x/w decomposition of E is checked against `builder.evaluate` on random (x, w).
+
+**Instances.** Four, all with lambda_1 = 5, lambda_3 = lambda_4 = 400 and lambda_link = `suggest_lambda_link(400, 400)`:
+- 3 units, T=6 (MUT/MDT 3/2, 2/2, 1/1), initial state all-OFF and [1,0,1];
+- 2 units, T=6 (MUT/MDT 4/3 and 3/2), initial state [0,0] and [1,1].
+
+**Result.**
+- Joint minimum equals product minimum on all four instances (relative tolerance 1e-6).
+- Negative control at lambda_link = 2*lambda_3 (the value behind the original bug): gap 0 on the two 3-unit instances, gap 400 (= lambda_3) on the two 2-unit instances.
+- 14 new tests; full suite 97 passed.
+
+**What this supports.** On these four small instances the suggested bound was sufficient, and the test can detect the old bug on the 2-unit instances.
+
+**What it does not support.**
+- The 15-unit, T=8 instance was not tested. The claim that the MILP minimum equals the joint (x, w) minimum there is still untested.
+- Horizon truncation is not stress-tested; the bound ignores it, so it is looser than needed here by an unknown amount. No test showed a need for a horizon-aware `suggest_lambda_link`, so it was left unchanged.
+- The 3-unit instances do not expose the old bug at 2*lambda_3, so they only show the bound is not violated there.
+- Four hand-built instances, not a proof.
+
+**QUBO size** (from `QUBOBuilder.info()`; "Q MB" is the dense float64 matrix, n*n*8/1e6; N=72 is the dispatchable-unit count of the loader).
+
+| N | T | x vars (no MUT/MDT) | w vars | total with w | Q MB (no w) | Q MB (with w) |
+|---|---|---|---|---|---|---|
+| 5 | 4 | 20 | 15 | 35 | 0.0032 | 0.0098 |
+| 5 | 8 | 40 | 35 | 75 | 0.0128 | 0.045 |
+| 5 | 24 | 120 | 115 | 235 | 0.1152 | 0.4418 |
+| 15 | 4 | 60 | 45 | 105 | 0.0288 | 0.0882 |
+| 15 | 8 | 120 | 105 | 225 | 0.1152 | 0.405 |
+| 15 | 24 | 360 | 345 | 705 | 1.0368 | 3.9762 |
+| 72 | 4 | 288 | 216 | 504 | 0.6636 | 2.0321 |
+| 72 | 8 | 576 | 504 | 1080 | 2.6542 | 9.3312 |
+| 72 | 24 | 1728 | 1656 | 3384 | 23.8879 | 91.6116 |
+
+The w block adds N*(T-1) variables, so at larger T it is nearly as big as the x block.
+
+**Open.** QAOA plan at laptop-simulable sizes.
+
+---
 ## 2026-11-09: Classical MILP baseline at N=15, T=8: the best constant schedule is the minimum
 
 **Question.** Is the best constant schedule (-11,322,757,836.93) merely an upper bound, or is it the minimum QUBO energy for this instance? SA results were being compared against an unproven reference.
